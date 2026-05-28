@@ -57,7 +57,7 @@ async def get_stream(
         anime_id=anime_id,
         episode=episode,
         url=url,
-        referer="https://youtu-chan.com"  // Bypasses resource blockades automatically
+        referer="https://youtu-chan.com"  # Bypasses resource blockades automatically
     )
 
 @app.get("/health")
