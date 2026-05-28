@@ -1,0 +1,40 @@
+name: Auto-Sync Ani-Cli
+
+on:
+  schedule:
+    - cron: '0 */12 * * *' # Runs every 12 hours
+  workflow_dispatch: # Allows you to click a button on GitHub to force an update
+
+jobs:
+  update-scraper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Latest ani-cli Script
+        run: |
+          # Fetch the raw bash script from the official repo
+          curl -sL https://raw.githubusercontent.com/pystardust/ani-cli/master/ani-cli -o bin/ani-cli
+          chmod +x bin/ani-cli
+
+      - name: Check for Changes
+        id: git-check
+        run: |
+          git status
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and Push if Changed
+        if: steps.git-check.outputs.changes == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add bin/ani-cli
+          # Professional commit formatting
+          git commit -m "fix: auto-update ani-cli bash script from upstream"
+          git push
+          echo "Changes pushed. Railway will now auto-deploy."
