@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import os
+import json
 from typing import Optional, List, Dict
 
-# Standardize log outputs across processing boundaries
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -12,41 +12,66 @@ logger = logging.getLogger("AniCliExecutor")
 
 class AniCliExecutor:
     """
-    Asynchronously coordinates the headless execution of the underlying scraper script.
+    Asynchronously coordinates catalog discovery and streaming link resolution.
     """
     def __init__(self, script_path: str = "/server/bin/ani-cli"):
         self.script_path = script_path
+        # Replicating the exact operational header parameters from upstream source
+        self.agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
+        self.referer = "https://youtu-chan.com"
+        self.api_url = "https://api.allanime.day/api"
 
     async def search_catalog(self, query: str) -> List[Dict[str, str]]:
         """
-        Executes text searches and handles standard terminal text maps defensively.
+        Queries the upstream GraphQL index natively using curl and applies the exact sed parsing rule.
         """
         assert isinstance(query, str) and len(query.strip()) > 0, "Query payload cannot be empty."
-        logger.info(f"Spawning catalog search process for: '{query}'")
+        logger.info(f"Executing direct native API matrix scan for token: '{query}'")
         
+        # Exact GraphQL payload extracted from script search loop definitions
+        gql_query = (
+            "query($search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType "
+            "$countryOrigin: VaildCountryOriginEnumType) { shows(search: $search limit: $limit page: $page "
+            "translationType: $translationType countryOrigin: $countryOrigin) { edges { _id name availableEpisodes __typename } }}"
+        )
+        
+        payload = {
+            "variables": {
+                "search": {
+                    "allowAdult": False,
+                    "allowUnknown": False,
+                    "query": query
+                },
+                "limit": 40,
+                "page": 1,
+                "translationType": "sub",
+                "countryOrigin": "ALL"
+            },
+            "query": gql_query
+        }
+
         try:
-            custom_env = os.environ.copy()
-            custom_env["ANI_CLI_PLAYER"] = "debug"
-            
-            # We explicitly feed an empty input to the process standard input channel.
-            # This triggers an immediate EOF when the script prompts for menu loops,
-            # forcing the internal search functions to dump the parsed index to stdout.
-            process = await asyncio.create_subprocess_exec(
-                self.script_path, query,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=custom_env
+            # We bypass the script and invoke curl + sed directly to escape terminal traps completely
+            curl_cmd = (
+                f"curl -e '{self.referer}' -s -H 'Content-Type: application/json' -X POST '{self.api_url}' "
+                f"-d '{json.dumps(payload)}' -A '{self.agent}' | "
+                f"sed 's|Show|\\n|g' | sed -nE 's|.*_id\":\"([^\"]*)\",\"name\":\"(.+)\",.*sub\":([1-9][^,]*).*|\\1\\t\\2 (\\3 episodes)|p' | sed 's/\\\\\"//g'"
             )
             
-            # Send EOF immediately to bypass interactive wait matrices
-            stdout, stderr = await process.communicate(input=b"\n")
+            process = await asyncio.create_subprocess_shell(
+                curl_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
             
-            raw_output = stdout.decode().strip()
-            logger.info(f"Raw process stdout capture check completed.")
-            
+            if process.returncode != 0:
+                logger.error(f"Native API bridge faulted: {stderr.decode().strip()}")
+                return []
+                
             matches = []
-            # Parse the tab-separated records returned from search_anime()
+            raw_output = stdout.decode().strip()
+            
             for line in raw_output.split("\n"):
                 if "\t" in line:
                     anime_id, metadata = line.split("\t", 1)
@@ -57,12 +82,12 @@ class AniCliExecutor:
             return matches
             
         except Exception as e:
-            logger.error(f"Critical state failure during directory lookup: {str(e)}")
+            logger.error(f"Critical data mapping failure inside api bridge: {str(e)}")
             return []
 
     async def get_stream_url(self, anime_id: str, episode: int) -> Optional[str]:
         """
-        Resolves direct streaming parameters by supplying surgical item identifiers.
+        Resolves direct streaming parameters by supplying surgical item identifiers to the script.
         """
         assert isinstance(anime_id, str) and len(anime_id.strip()) > 0, "ID payload cannot be empty."
         assert isinstance(episode, int) and episode > 0, "Episode index must be positive."
@@ -73,7 +98,7 @@ class AniCliExecutor:
             custom_env = os.environ.copy()
             custom_env["ANI_CLI_PLAYER"] = "debug"
             
-            # Use strict integer 1 to select the exact targeted match safely
+            # Streaming works fine with -S 1 because it bypasses the search menu entirely when an exact ID match hits
             process = await asyncio.create_subprocess_exec(
                 self.script_path, 
                 "-S", "1", 
