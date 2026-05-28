@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import os
 from typing import Optional
 
 # Trace Debugging: Standardize log output
@@ -25,12 +26,19 @@ class AniCliExecutor:
         logger.info(f"Initiating scraping for query: '{query}', Episode: {episode}")
         
         try:
-            # We must use headless flags. Ensure ani-cli supports non-interactive output.
-            # You may need to tweak these arguments based on ani-cli's current CLI docs.
+            # Defensive Programming: Copy environment and enforce headless player mode
+            custom_env = os.environ.copy()
+            custom_env["ANI_CLI_PLAYER"] = "debug"
+            
+            # Subprocess Configuration: Pass -S 1 to pick first search result automatically
             process = await asyncio.create_subprocess_exec(
-                self.script_path, query, "-e", str(episode),
+                self.script_path, 
+                "-S", "1", 
+                "-e", str(episode), 
+                query,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=custom_env
             )
             
             # Wait for execution without blocking the server
