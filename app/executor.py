@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import re
 import os
 from typing import Optional
 
@@ -19,18 +18,18 @@ class AniCliExecutor:
         self.script_path = script_path
 
     async def get_stream_url(self, query: str, episode: int) -> Optional[str]:
-        # Defensive Programming: Fail-fast before allocating resources
+        # Defensive Programming: Fail-fast validation checkpoints
         assert isinstance(query, str) and len(query.strip()) > 0, "Query must be a valid, non-empty string."
         assert isinstance(episode, int) and episode > 0, "Episode must be a positive integer."
         
         logger.info(f"Initiating scraping for query: '{query}', Episode: {episode}")
         
         try:
-            # Defensive Programming: Copy environment and enforce headless player mode
+            # Copy environment and enforce headless player mode
             custom_env = os.environ.copy()
             custom_env["ANI_CLI_PLAYER"] = "debug"
             
-            # Subprocess Configuration: Pass -S 1 to pick first search result automatically
+            # Subprocess Configuration: Pass options BEFORE the query argument
             process = await asyncio.create_subprocess_exec(
                 self.script_path, 
                 "-S", "1", 
@@ -41,7 +40,6 @@ class AniCliExecutor:
                 env=custom_env
             )
             
-            # Wait for execution without blocking the server
             stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
@@ -56,14 +54,23 @@ class AniCliExecutor:
 
     def _extract_link(self, terminal_output: str) -> Optional[str]:
         """
-        Parses the stdout using regex to find the final streaming link.
+        Parses the stdout by anchoring directly to the script's debug layout block.
         """
-        # Looks for http/https links ending in typical video formats
-        match = re.search(r'(https?://[^\s"\'<>]+(?:\.m3u8|\.mp4|\.mkv))', terminal_output, re.IGNORECASE)
-        if match:
-            url = match.group(1)
-            logger.info(f"Successfully extracted URL: {url}")
-            return url
+        logger.info("Parsing terminal standard output stream...")
+        if "Selected link:" not in terminal_output:
+            logger.warning("Execution completed, but 'Selected link:' anchor missing from stdout.")
+            return None
             
-        logger.warning("Execution succeeded, but regex failed to find a valid media URL in stdout.")
+        try:
+            # Slice output directly after the explicit 'Selected link:' line marker
+            parts = terminal_output.split("Selected link:")
+            raw_link = parts[1].strip().split("\n")[0].strip()
+            
+            if raw_link.startswith("http"):
+                logger.info(f"Successfully isolated URL from debug block.")
+                return raw_link
+        except Exception as e:
+            logger.error(f"Failed to parse string boundary matrix: {str(e)}")
+            
+        logger.warning("Target block extraction failed to isolate a valid HTTP sequence.")
         return None
