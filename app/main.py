@@ -1,65 +1,151 @@
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
-from typing import List
-from app.executor import AniCliExecutor
-import logging
+from enum import Enum
+from typing import List, Optional
 
-# Trace Debugging Configuration
-logger = logging.getLogger("API_Router")
-app = FastAPI(title="Premium Anime Scraper API")
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from app.executor import AniCliExecutor
+
+app = FastAPI(
+    title="op-anime API",
+    description="Self-healing anime backend powered by ani-cli",
+    version="2.0.0",
+)
+
+# CORS — allows Flutter web, any browser client
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 executor = AniCliExecutor()
 
-# Data Transfer Objects for Structural Responses
-class AnimeSearchMatch(BaseModel):
+
+# --------------------------------------------------------------------------
+# Enums & Models
+# --------------------------------------------------------------------------
+
+class TranslationType(str, Enum):
+    sub = "sub"
+    dub = "dub"
+
+
+class SearchResult(BaseModel):
     id: str
     title: str
 
+
+class EpisodesResponse(BaseModel):
+    anime_id: str
+    mode: str
+    episodes: List[str]
+    count: int
+
+
 class StreamResponse(BaseModel):
     anime_id: str
-    episode: int
+    episode: str
     url: str
-    referer: str  # Critical cross-origin media header payload
+    referer: str
+    quality: Optional[str] = None
 
-@app.get("/api/v1/search", response_model=List[AnimeSearchMatch])
-async def search_anime(query: str = Query(..., min_length=2, description="The text search query")):
+
+# --------------------------------------------------------------------------
+# Endpoints
+# --------------------------------------------------------------------------
+
+@app.get("/api/v1/search", response_model=List[SearchResult])
+async def search_anime(
+    query: str = Query(..., min_length=1, description="Anime title to search for"),
+    mode: TranslationType = Query(
+        TranslationType.sub, description="sub or dub"
+    ),
+):
     """
-    Queries the upstream index and extracts matching titles with their specific IDs.
+    Search the anime catalog by title.
+
+    Returns a list of matching anime with their IDs and titles.
+    The ID is needed for the /episodes and /stream endpoints.
     """
-    logger.info(f"Incoming catalog search request for token: '{query}'")
-    results = await executor.search_catalog(query)
-    
+    results = await executor.search(query, mode=mode.value)
+
     if not results:
-        logger.warning(f"Catalog query returned 0 matches for token: '{query}'")
-        raise HTTPException(status_code=404, detail="No matching anime series discovered.")
-        
-    return results
+        raise HTTPException(status_code=404, detail="No results found.")
+
+    return [SearchResult(**r) for r in results]
+
+
+@app.get("/api/v1/episodes", response_model=EpisodesResponse)
+async def get_episodes(
+    anime_id: str = Query(..., min_length=1, description="Anime ID from search results"),
+    mode: TranslationType = Query(
+        TranslationType.sub, description="sub or dub"
+    ),
+):
+    """
+    List all available episode numbers for a given anime.
+
+    Use the anime_id returned by /search. Episode numbers may
+    include decimals (e.g. "5.5" for specials).
+    """
+    episodes = await executor.episodes(anime_id, mode=mode.value)
+
+    if not episodes:
+        raise HTTPException(
+            status_code=404,
+            detail="No episodes found for this anime and translation type.",
+        )
+
+    return EpisodesResponse(
+        anime_id=anime_id,
+        mode=mode.value,
+        episodes=episodes,
+        count=len(episodes),
+    )
+
 
 @app.get("/api/v1/stream", response_model=StreamResponse)
 async def get_stream(
-    anime_id: str = Query(..., description="The precise upstream structural ID of the anime"),
-    episode: int = Query(..., gt=0, description="Target episode marker")
+    anime_id: str = Query(..., min_length=1, description="Anime ID from search results"),
+    episode: str = Query(..., min_length=1, description="Episode number (e.g. '1', '5.5')"),
+    mode: TranslationType = Query(
+        TranslationType.sub, description="sub or dub"
+    ),
+    quality: str = Query(
+        "best", description="Video quality: best, worst, 720p, 1080p, etc."
+    ),
 ):
     """
-    Resolves the exact stream URL using the specified series ID and episode index.
+    Resolve a direct stream URL for a specific episode.
+
+    The returned URL can be played directly in a video player.
+    Include the returned referer header when fetching the stream
+    to avoid CORS / hotlink blocks.
     """
-    logger.info(f"Stream generation requested for ID: '{anime_id}', Episode: {episode}")
-    url = await executor.get_stream_url(anime_id, episode)
-    
-    if not url:
-        logger.error(f"Execution matrix failed to resolve stream link for ID: '{anime_id}'")
-        # Graceful Degradation: Trigger client-side under-maintenance screen
+    result = await executor.get_stream(
+        anime_id, episode, mode=mode.value, quality=quality
+    )
+
+    if not result:
         raise HTTPException(
-            status_code=503, 
-            detail="Upstream scraper failed or is under maintenance. Try again later."
+            status_code=503,
+            detail="Failed to resolve stream URL. The upstream scraper may be "
+            "down or the episode may not be available. Try again later.",
         )
-        
+
     return StreamResponse(
         anime_id=anime_id,
         episode=episode,
-        url=url,
-        referer="https://youtu-chan.com"  # Bypasses resource blockades automatically
+        url=result["url"],
+        referer=result.get("referer", ""),
+        quality=quality,
     )
 
+
 @app.get("/health")
-async def health_check():
-    return {"status": "online", "system": "optimal"}
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok"}

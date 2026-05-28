@@ -1,143 +1,167 @@
 import asyncio
 import logging
 import os
-import json
 from typing import Optional, List, Dict
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("AniCliExecutor")
 
+# Timeouts in seconds — search/episodes are fast API calls,
+# stream needs multiple provider fetches in parallel
+TIMEOUT_FAST = 30
+TIMEOUT_STREAM = 60
+
+
 class AniCliExecutor:
     """
-    Asynchronously coordinates catalog discovery and streaming link resolution.
+    Async Python bridge to ani-cli-api.sh.
+
+    Every call delegates to the shell wrapper, which sources the upstream
+    ani-cli functions directly. When the bash script is updated by GitHub
+    Actions, all logic here automatically reflects those changes.
     """
-    def __init__(self, script_path: str = "/server/bin/ani-cli"):
-        self.script_path = script_path
-        # Replicating the exact operational header parameters from upstream source
-        self.agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
-        self.referer = "https://youtu-chan.com"
-        self.api_url = "https://api.allanime.day/api"
 
-    async def search_catalog(self, query: str) -> List[Dict[str, str]]:
+    def __init__(self, wrapper_path: str = "/server/bin/ani-cli-api.sh"):
+        self.wrapper = wrapper_path
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_env(self, mode: str = "sub", quality: str = "best") -> dict:
+        """Build a subprocess environment with ani-cli overrides."""
+        env = os.environ.copy()
+        env["ANI_CLI_MODE"] = mode
+        env["ANI_CLI_QUALITY"] = quality
+        # Safety: ensure the wrapper never tries to open a player
+        env["ANI_CLI_PLAYER"] = "debug"
+        return env
+
+    async def _run(
+        self,
+        *args: str,
+        env: Optional[dict] = None,
+        timeout: int = TIMEOUT_FAST,
+    ) -> tuple[str, str, int]:
         """
-        Queries the upstream GraphQL index natively using curl and applies the exact sed parsing rule.
+        Run the wrapper script with the given arguments.
+        Returns (stdout, stderr, returncode).
+        Kills the process if it exceeds the timeout.
         """
-        assert isinstance(query, str) and len(query.strip()) > 0, "Query payload cannot be empty."
-        logger.info(f"Executing direct native API matrix scan for token: '{query}'")
-        
-        # Exact GraphQL payload extracted from script search loop definitions
-        gql_query = (
-            "query($search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType "
-            "$countryOrigin: VaildCountryOriginEnumType) { shows(search: $search limit: $limit page: $page "
-            "translationType: $translationType countryOrigin: $countryOrigin) { edges { _id name availableEpisodes __typename } }}"
+        process = await asyncio.create_subprocess_exec(
+            self.wrapper,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env or self._build_env(),
         )
-        
-        payload = {
-            "variables": {
-                "search": {
-                    "allowAdult": False,
-                    "allowUnknown": False,
-                    "query": query
-                },
-                "limit": 40,
-                "page": 1,
-                "translationType": "sub",
-                "countryOrigin": "ALL"
-            },
-            "query": gql_query
-        }
-
         try:
-            # We bypass the script and invoke curl + sed directly to escape terminal traps completely
-            curl_cmd = (
-                f"curl -e '{self.referer}' -s -H 'Content-Type: application/json' -X POST '{self.api_url}' "
-                f"-d '{json.dumps(payload)}' -A '{self.agent}' | "
-                f"sed 's|Show|\\n|g' | sed -nE 's|.*_id\":\"([^\"]*)\",\"name\":\"(.+)\",.*sub\":([1-9][^,]*).*|\\1\\t\\2 (\\3 episodes)|p' | sed 's/\\\\\"//g'"
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=timeout
             )
-            
-            process = await asyncio.create_subprocess_shell(
-                curl_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                logger.error(f"Native API bridge faulted: {stderr.decode().strip()}")
-                return []
-                
-            matches = []
-            raw_output = stdout.decode().strip()
-            
-            for line in raw_output.split("\n"):
-                if "\t" in line:
-                    anime_id, metadata = line.split("\t", 1)
-                    matches.append({
-                        "id": anime_id.strip(),
-                        "title": metadata.strip()
-                    })
-            return matches
-            
-        except Exception as e:
-            logger.error(f"Critical data mapping failure inside api bridge: {str(e)}")
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            logger.error("Subprocess timed out after %ds: %s %s", timeout, self.wrapper, " ".join(args))
+            raise
+        return stdout.decode(), stderr.decode(), process.returncode
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def search(self, query: str, mode: str = "sub") -> List[Dict[str, str]]:
+        """
+        Search the anime catalog. Returns a list of {id, title} dicts.
+
+        Calls ani-cli's search_anime() function under the hood, which
+        hits the upstream GraphQL API and parses results with sed.
+        """
+        env = self._build_env(mode=mode)
+        try:
+            stdout, stderr, rc = await self._run("search", query, env=env)
+        except asyncio.TimeoutError:
             return []
 
-    async def get_stream_url(self, anime_id: str, episode: int) -> Optional[str]:
+        if rc != 0:
+            logger.error("Search failed (rc=%d): %s", rc, stderr.strip())
+            return []
+
+        results: List[Dict[str, str]] = []
+        for line in stdout.strip().split("\n"):
+            if "\t" in line:
+                anime_id, title = line.split("\t", 1)
+                results.append({
+                    "id": anime_id.strip(),
+                    "title": title.strip(),
+                })
+        return results
+
+    async def episodes(self, anime_id: str, mode: str = "sub") -> List[str]:
         """
-        Resolves direct streaming parameters by supplying surgical item identifiers to the script.
+        List available episode numbers for a given anime ID.
+
+        Calls ani-cli's episodes_list() function, which queries the
+        upstream GraphQL API for the show's availableEpisodesDetail.
         """
-        assert isinstance(anime_id, str) and len(anime_id.strip()) > 0, "ID payload cannot be empty."
-        assert isinstance(episode, int) and episode > 0, "Episode index must be positive."
-        
-        logger.info(f"Spawning scraper process for Target ID: '{anime_id}', Episode: {episode}")
-        
+        env = self._build_env(mode=mode)
         try:
-            custom_env = os.environ.copy()
-            custom_env["ANI_CLI_PLAYER"] = "debug"
-            
-            # Streaming works fine with -S 1 because it bypasses the search menu entirely when an exact ID match hits
-            process = await asyncio.create_subprocess_exec(
-                self.script_path, 
-                "-S", "1", 
-                "-e", str(episode), 
-                anime_id,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=custom_env
+            stdout, stderr, rc = await self._run("episodes", anime_id, env=env)
+        except asyncio.TimeoutError:
+            return []
+
+        if rc != 0:
+            logger.error("Episodes list failed (rc=%d): %s", rc, stderr.strip())
+            return []
+
+        return [ep.strip() for ep in stdout.strip().split("\n") if ep.strip()]
+
+    async def get_stream(
+        self,
+        anime_id: str,
+        episode: str,
+        mode: str = "sub",
+        quality: str = "best",
+    ) -> Optional[Dict[str, str]]:
+        """
+        Resolve a direct stream URL for a specific episode.
+
+        Calls ani-cli's get_episode_url() function, which:
+        1. Fetches episode embed data from the upstream API
+        2. Decrypts the response if needed (openssl aes-256-ctr)
+        3. Resolves direct links from multiple providers in parallel
+        4. Selects the link matching the requested quality
+
+        Returns {url, referer} or None on failure.
+        """
+        env = self._build_env(mode=mode, quality=quality)
+        try:
+            stdout, stderr, rc = await self._run(
+                "stream", anime_id, episode, env=env, timeout=TIMEOUT_STREAM
             )
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                logger.error(f"Media resolver sub-process faulted: {stderr.decode().strip()}")
-                return None
-                
-            return self._extract_link(stdout.decode())
-            
-        except Exception as e:
-            logger.error(f"Critical state failure during content resolution: {str(e)}")
+        except asyncio.TimeoutError:
             return None
 
-    def _extract_link(self, terminal_output: str) -> Optional[str]:
-        """
-        Slices the raw standard output stream cleanly relative to the text boundaries.
-        """
-        logger.info("Analyzing process standard output block...")
-        if "Selected link:" not in terminal_output:
-            logger.warning("Target block failed validation: 'Selected link:' string token missing.")
+        if rc != 0:
+            logger.error("Stream resolution failed (rc=%d): %s", rc, stderr.strip())
             return None
-            
-        try:
-            parts = terminal_output.split("Selected link:")
-            raw_link = parts[1].strip().split("\n")[0].strip()
-            
-            if raw_link.startswith("http"):
-                logger.info("Successfully extracted HTTP stream target segment.")
-                return raw_link
-        except Exception as e:
-            logger.error(f"Boundary index parsing failure: {str(e)}")
-            
-        logger.warning("Output evaluation terminated without finding a clean URI sequence.")
-        return None
+
+        return self._parse_stream_output(stdout)
+
+    @staticmethod
+    def _parse_stream_output(output: str) -> Optional[Dict[str, str]]:
+        """Parse the wrapper's URL:/REFERER: prefixed output."""
+        result: Dict[str, str] = {}
+        for line in output.strip().split("\n"):
+            if line.startswith("URL:"):
+                result["url"] = line[4:].strip()
+            elif line.startswith("REFERER:"):
+                result["referer"] = line[8:].strip()
+
+        if "url" not in result or not result["url"].startswith("http"):
+            logger.warning("Stream output did not contain a valid URL")
+            return None
+        return result
