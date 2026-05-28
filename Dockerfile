@@ -1,30 +1,28 @@
-# Use a slim Python image to keep the container lightweight
 FROM python:3.11-slim
 
-# Defensive Programming: Ensure system dependencies for the bash script exist
-RUN apt-get update && apt-get install -y \
+# System deps required by ani-cli: curl, sed, grep for scraping,
+# openssl for provider response decryption (aes-256-ctr),
+# fzf as a fallback dep-check requirement, ffmpeg for m3u8 handling.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     curl \
     grep \
     sed \
     fzf \
     ffmpeg \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /server
 
-# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire application
 COPY . .
 
-# Ensure the bash script is executable
-RUN chmod +x /server/bin/ani-cli
+# Both scripts must be executable
+RUN chmod +x /server/bin/ani-cli /server/bin/ani-cli-api.sh
 
-# Expose the port Railway expects
 EXPOSE 8000
 
-# Start the FastAPI server using Uvicorn
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
