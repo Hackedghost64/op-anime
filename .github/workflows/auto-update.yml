@@ -32,9 +32,16 @@ jobs:
 
       - name: Commit and Push if Changed
         if: steps.git-check.outputs.changes == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add bin/ani-cli
           git commit -m "fix: auto-sync ani-cli from upstream"
           git push
+          if [ -n "$HF_TOKEN" ]; then
+            git remote add hf https://hackedghost:$HF_TOKEN@huggingface.co/spaces/hackedghost/op_anime
+            git push hf main --force
+          fi
+

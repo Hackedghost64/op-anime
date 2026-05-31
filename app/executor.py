@@ -24,8 +24,20 @@ class AniCliExecutor:
     Actions, all logic here automatically reflects those changes.
     """
 
-    def __init__(self, wrapper_path: str = "/server/bin/ani-cli-api.sh"):
+    def __init__(self, wrapper_path: Optional[str] = None):
+        if wrapper_path is None:
+            wrapper_path = os.environ.get("ANI_CLI_WRAPPER_PATH")
+        if wrapper_path is None:
+            # Try to resolve relative to this file for local running/testing
+            local_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "bin", "ani-cli-api.sh")
+            )
+            if os.path.exists(local_path):
+                wrapper_path = local_path
+            else:
+                wrapper_path = "/server/bin/ani-cli-api.sh"
         self.wrapper = wrapper_path
+        logger.info("Initialized AniCliExecutor with wrapper at: %s", self.wrapper)
 
     # ------------------------------------------------------------------
     # Internal helpers

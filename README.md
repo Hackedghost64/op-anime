@@ -1,3 +1,13 @@
+---
+title: op-anime
+emoji: 🎥
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # op-anime — Self-Healing Anime Backend
 
 A FastAPI backend that wraps the [ani-cli](https://github.com/pystardust/ani-cli) bash scraper, exposing clean REST endpoints for a Flutter client (or any HTTP consumer).

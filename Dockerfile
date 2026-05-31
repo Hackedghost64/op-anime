@@ -11,18 +11,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fzf \
     ffmpeg \
     openssl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /server
+# Create a non-root user with UID 1000 (required for Hugging Face Spaces compatibility)
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR $HOME/app
 
-COPY . .
+COPY --chown=user:user requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Both scripts must be executable
-RUN chmod +x /server/bin/ani-cli /server/bin/ani-cli-api.sh
+COPY --chown=user:user . .
 
-EXPOSE 8000
+# Ensure bin directory scripts are executable
+RUN chmod +x bin/ani-cli bin/ani-cli-api.sh
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 7860
+
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
