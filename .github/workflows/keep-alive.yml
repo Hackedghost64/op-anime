@@ -1,0 +1,16 @@
+name: Keep Hugging Face Space Alive
+
+on:
+  schedule:
+    # Run every 12 hours
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Hugging Face Space
+        run: |
+          echo "Pinging Hugging Face Space to prevent it from spinning down..."
+          curl -f -I -s https://hackedghost-op-anime.hf.space || echo "Ping returned non-zero, but the request was sent!"
